@@ -1,109 +1,91 @@
-import asyncpg
+import aiohttp
 import os
-from config import DATABASE_URL
 
+SUPABASE_URL = os.getenv("SUPABASE_URL", "")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
 
-_pool = None
-
-
-async def get_pool():
-    global _pool
-    if _pool is None:
-        _pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=10, statement_cache_size=0)
-    return _pool
-
-
-async def init_db():
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                user_id BIGINT PRIMARY KEY,
-                username TEXT,
-                weight REAL,
-                height REAL,
-                age INTEGER,
-                gender TEXT,
-                goal TEXT,
-                activity TEXT,
-                daily_calories REAL,
-                created_at TIMESTAMP DEFAULT NOW()
-            )
-        """)
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS food_log (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT,
-                date TEXT,
-                meal_type TEXT,
-                food_name TEXT,
-                weight_g REAL,
-                calories REAL,
-                protein REAL,
-                fat REAL,
-                carbs REAL,
-                logged_at TIMESTAMP DEFAULT NOW(),
-                FOREIGN KEY (user_id) REFERENCES users(user_id)
-            )
-        """)
+HEADERS = {
+    "apikey": SUPABASE_KEY,
+    "Authorization": f"Bearer {SUPABASE_KEY}",
+    "Content-Type": "application/json",
+    "Prefer": "return=representation"
+}
 
 
 async def get_user(user_id: int):
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        return await conn.fetchrow("SELECT * FROM users WHERE user_id = $1", user_id)
+    async with aiohttp.ClientSession() as session:
+        async with session.get(
+            f"{SUPABASE_URL}/rest/v1/nutri_users",
+            headers=HEADERS,
+            params={"user_id": f"eq.{user_id}", "limit": "1"}
+        ) as resp:
+            data = await resp.json()
+            return data[0] if data else None
 
 
 async def save_user(user_id: int, username: str, weight: float, height: float,
                     age: int, gender: str, goal: str, activity: str):
     daily_calories = calculate_calories(weight, height, age, gender, goal, activity)
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        await conn.execute("""
-            INSERT INTO users (user_id, username, weight, height, age, gender, goal, activity, daily_calories)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-            ON CONFLICT(user_id) DO UPDATE SET
-                weight=EXCLUDED.weight,
-                height=EXCLUDED.height,
-                age=EXCLUDED.age,
-                gender=EXCLUDED.gender,
-                goal=EXCLUDED.goal,
-                activity=EXCLUDED.activity,
-                daily_calories=EXCLUDED.daily_calories
-        """, user_id, username, weight, height, age, gender, goal, activity, daily_calories)
+    payload = {
+        "user_id": user_id,
+        "username": username,
+        "weight": weight,
+        "height": height,
+        "age": age,
+        "gender": gender,
+        "goal": goal,
+        "activity": activity,
+        "daily_calories": daily_calories
+    }
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            f"{SUPABASE_URL}/rest/v1/nutri_users",
+            headers={**HEADERS, "Prefer": "resolution=merge-duplicates,return=representation"},
+            json=payload
+        ) as resp:
+            await resp.json()
     return daily_calories
 
 
 async def log_food(user_id: int, date: str, meal_type: str, food_name: str,
                    weight_g: float, calories: float, protein: float, fat: float, carbs: float):
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        await conn.execute("""
-            INSERT INTO food_log (user_id, date, meal_type, food_name, weight_g, calories, protein, fat, carbs)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-        """, user_id, date, meal_type, food_name, weight_g, calories, protein, fat, carbs)
+    payload = {
+        "user_id": user_id,
+        "date": date,
+        "meal_type": meal_type,
+        "food_name": food_name,
+        "weight_g": weight_g,
+        "calories": calories,
+        "protein": protein,
+        "fat": fat,
+        "carbs": carbs
+    }
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            f"{SUPABASE_URL}/rest/v1/nutri_food_log",
+            headers=HEADERS,
+            json=payload
+        ) as resp:
+            await resp.json()
 
 
 async def get_daily_log(user_id: int, date: str):
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        return await conn.fetch(
-            "SELECT * FROM food_log WHERE user_id = $1 AND date = $2 ORDER BY logged_at",
-            user_id, date
-        )
+    async with aiohttp.ClientSession() as session:
+        async with session.get(
+            f"{SUPABASE_URL}/rest/v1/nutri_food_log",
+            headers=HEADERS,
+            params={"user_id": f"eq.{user_id}", "date": f"eq.{date}", "order": "logged_at"}
+        ) as resp:
+            return await resp.json()
 
 
 async def get_daily_totals(user_id: int, date: str):
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        return await conn.fetchrow("""
-            SELECT 
-                COALESCE(SUM(calories), 0) as total_calories,
-                COALESCE(SUM(protein), 0) as total_protein,
-                COALESCE(SUM(fat), 0) as total_fat,
-                COALESCE(SUM(carbs), 0) as total_carbs
-            FROM food_log WHERE user_id = $1 AND date = $2
-        """, user_id, date)
+    logs = await get_daily_log(user_id, date)
+    total_calories = sum(r.get("calories", 0) for r in logs)
+    total_protein = sum(r.get("protein", 0) for r in logs)
+    total_fat = sum(r.get("fat", 0) for r in logs)
+    total_carbs = sum(r.get("carbs", 0) for r in logs)
+    return (total_calories, total_protein, total_fat, total_carbs)
 
 
 def calculate_calories(weight: float, height: float, age: int, gender: str,
