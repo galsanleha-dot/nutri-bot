@@ -16,7 +16,9 @@ class FoodLogStates(StatesGroup):
     waiting_food_select = State()
     waiting_weight = State()
     waiting_manual_calories = State()
-    waiting_manual_pfc = State()
+    waiting_manual_protein = State()
+    waiting_manual_fat = State()
+    waiting_manual_carbs = State()
 
 
 @router.message(F.text == "🍽 Добавить еду")
@@ -25,7 +27,6 @@ async def add_food_start(message: types.Message, state: FSMContext):
     if not user:
         await message.answer("❌ Сначала заполни профиль — нажми 👤 Профиль")
         return
-
     await message.answer("Выбери приём пищи:", reply_markup=meal_type_keyboard())
     await state.set_state(FoodLogStates.waiting_meal_type)
 
@@ -42,10 +43,8 @@ async def select_meal_type(callback: types.CallbackQuery, state: FSMContext):
 async def search_food_handler(message: types.Message, state: FSMContext):
     query = message.text.strip()
     await state.update_data(query=query)
-
     await message.answer("🔍 Ищу...")
 
-    # Try local first, then OpenFoodFacts
     local = search_local(query)
     if local:
         products = [{
@@ -67,7 +66,7 @@ async def search_food_handler(message: types.Message, state: FSMContext):
         await state.set_state(FoodLogStates.waiting_food_select)
     else:
         await message.answer(
-            "❌ Не нашёл такой продукт в базе.\n\nВведём вручную — сколько ккал на 100г?:"
+            "❌ Не нашёл такой продукт.\n\nВведём вручную — сколько ккал на 100г?"
         )
         await state.set_state(FoodLogStates.waiting_manual_calories)
 
@@ -128,7 +127,6 @@ async def get_food_weight(message: types.Message, state: FSMContext):
         carbs=carbs
     )
 
-    # Show daily progress
     totals = await get_daily_totals(message.from_user.id, today)
     user = await get_user(message.from_user.id)
     daily_norm = int(user["daily_calories"])
@@ -154,14 +152,47 @@ async def manual_calories(message: types.Message, state: FSMContext):
     except ValueError:
         await message.answer("❌ Введи число, например: 250")
         return
+    await state.update_data(manual_calories=calories)
+    await message.answer("Белки на 100г (г)? Если не знаешь — введи 0:")
+    await state.set_state(FoodLogStates.waiting_manual_protein)
+
+
+@router.message(FoodLogStates.waiting_manual_protein)
+async def manual_protein(message: types.Message, state: FSMContext):
+    try:
+        protein = float(message.text.replace(",", "."))
+    except ValueError:
+        protein = 0
+    await state.update_data(manual_protein=protein)
+    await message.answer("Жиры на 100г (г)? Если не знаешь — введи 0:")
+    await state.set_state(FoodLogStates.waiting_manual_fat)
+
+
+@router.message(FoodLogStates.waiting_manual_fat)
+async def manual_fat(message: types.Message, state: FSMContext):
+    try:
+        fat = float(message.text.replace(",", "."))
+    except ValueError:
+        fat = 0
+    await state.update_data(manual_fat=fat)
+    await message.answer("Углеводы на 100г (г)? Если не знаешь — введи 0:")
+    await state.set_state(FoodLogStates.waiting_manual_carbs)
+
+
+@router.message(FoodLogStates.waiting_manual_carbs)
+async def manual_carbs(message: types.Message, state: FSMContext):
+    try:
+        carbs = float(message.text.replace(",", "."))
+    except ValueError:
+        carbs = 0
 
     data = await state.get_data()
     await state.update_data(selected_food={
         "name": data["query"],
-        "calories_per_100g": calories,
-        "protein_per_100g": 0,
-        "fat_per_100g": 0,
-        "carbs_per_100g": 0,
+        "calories_per_100g": data["manual_calories"],
+        "protein_per_100g": data["manual_protein"],
+        "fat_per_100g": data["manual_fat"],
+        "carbs_per_100g": carbs,
     })
     await message.answer("Сколько грамм ты съел(а)?")
     await state.set_state(FoodLogStates.waiting_weight)
